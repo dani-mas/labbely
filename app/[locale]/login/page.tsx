@@ -3,17 +3,24 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
+import { Github } from "lucide-react";
 
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export default function LoginPage() {
   const router = useRouter();
   const locale = useLocale();
   const t = useTranslations("Login");
+  const tCommon = useTranslations("Common");
+  const logoSrc =
+    process.env.NODE_ENV === "development"
+      ? `/brand/labbely-logo.png?ts=${Date.now()}`
+      : "/brand/labbely-logo.png";
   const [odooUrl, setOdooUrl] = useState("");
   const [db, setDb] = useState("");
   const [username, setUsername] = useState("");
@@ -32,7 +39,14 @@ export default function LoginPage() {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       setStatus("error");
-      setMessage(payload?.error ?? t("loginFailed"));
+      const errorCode = payload?.errorCode ?? payload?.error;
+      const errorMessage =
+        errorCode === "missing_credentials" || errorCode === "Missing credentials"
+          ? t("errorMissingCredentials")
+          : errorCode === "invalid_credentials" || errorCode === "Invalid credentials"
+            ? t("errorInvalidCredentials")
+            : t("loginFailed");
+      setMessage(errorMessage);
       return;
     }
     setStatus("success");
@@ -42,14 +56,36 @@ export default function LoginPage() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-slate-50 px-6 py-12 text-slate-900">
-      <div className="absolute right-6 top-6">
+      <div className="absolute right-6 top-6 flex items-center gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <a
+              href="https://github.com/dani-mas/labbely"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 transition hover:bg-slate-100"
+              aria-label={tCommon("github")}
+            >
+              <Github className="h-4 w-4" />
+            </a>
+          </TooltipTrigger>
+          <TooltipContent>{tCommon("github")}</TooltipContent>
+        </Tooltip>
         <LanguageSwitcher />
       </div>
       <Card className="w-full max-w-md">
-        <CardHeader className="space-y-2">
-          <p className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
-            {t("brand")}
-          </p>
+        <CardHeader className="space-y-3">
+          <div className="flex items-center">
+            <img
+              src={logoSrc}
+              alt="Labbely"
+              width={220}
+              height={56}
+              className="h-8 w-auto"
+              loading="eager"
+              decoding="async"
+            />
+          </div>
           <CardTitle>{t("title")}</CardTitle>
           <CardDescription>{t("description")}</CardDescription>
         </CardHeader>

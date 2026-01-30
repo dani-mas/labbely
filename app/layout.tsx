@@ -17,8 +17,16 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Labely",
-  description: "Label printing app for Odoo and manual labels.",
+  title: "Labbely",
+  description: "Print-ready barcode labels for Odoo or manual workflows.",
+  icons: {
+    icon: [
+      { url: "/brand/labbely-icon.png", sizes: "16x16", type: "image/png" },
+      { url: "/brand/labbely-icon.png", sizes: "32x32", type: "image/png" },
+      { url: "/brand/labbely-icon.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/brand/labbely-icon.png", sizes: "180x180", type: "image/png" }],
+  },
 };
 
 export default async function RootLayout({

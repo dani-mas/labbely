@@ -4,9 +4,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { getMessages, getTranslations } from "next-intl/server";
 
 import { defaultLocale, isLocale, locales } from "@/lib/i18n";
-
-const getBaseUrl = () =>
-  process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+import { getBaseUrl, getOpenGraphLocale } from "@/lib/seo";
 
 type LocaleLayoutProps = Readonly<{
   children: React.ReactNode;
@@ -24,49 +22,58 @@ export async function generateMetadata({
   const locale = isLocale(resolvedParams.locale) ? resolvedParams.locale : defaultLocale;
   const t = await getTranslations({ locale, namespace: "Metadata" });
   const baseUrl = getBaseUrl();
+  const ogImageUrl = "/brand/mockup-hero.png";
+  const ogLocale = getOpenGraphLocale(locale);
+  const alternateOgLocale = ogLocale === "en_US" ? "es_ES" : "en_US";
 
   return {
     metadataBase: new URL(baseUrl),
+    applicationName: "Labbely",
     title: t("title"),
     description: t("description"),
     keywords: t("keywords").split(",").map((keyword) => keyword.trim()),
-    alternates: {
-      canonical: `/${locale}`,
-      languages: {
-        en: "/en",
-        es: "/es",
-      },
+    category: "Business",
+    creator: "Labbely",
+    publisher: "Labbely",
+    robots: {
+      index: true,
+      follow: true,
+      maxSnippet: -1,
+      maxImagePreview: "large",
+      maxVideoPreview: -1,
     },
     openGraph: {
       title: t("title"),
       description: t("description"),
-      url: `/${locale}`,
-      siteName: "Labely",
-      locale,
+      siteName: "Labbely",
+      locale: ogLocale,
+      alternateLocale: [alternateOgLocale],
       type: "website",
+      images: [
+        {
+          url: ogImageUrl,
+          alt: t("ogImageAlt"),
+        },
+      ],
     },
     twitter: {
       card: "summary_large_image",
       title: t("title"),
       description: t("description"),
+      images: [ogImageUrl],
     },
   };
 }
 
 export default async function LocaleLayout({ children, params }: LocaleLayoutProps) {
   const resolvedParams = await params;
-  console.log("🟢 LocaleLayout - params received:", resolvedParams);
 
   if (!isLocale(resolvedParams.locale)) {
-    console.log("  ❌ Invalid locale, calling notFound()");
     notFound();
   }
 
   const locale = resolvedParams.locale;
-  console.log("  ✅ Valid locale:", locale);
-  
   const messages = await getMessages({ locale });
-  console.log("  📦 Messages loaded, keys:", Object.keys(messages).slice(0, 5), "...");
 
   return (
     <NextIntlClientProvider key={locale} locale={locale} messages={messages}>

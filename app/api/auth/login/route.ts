@@ -7,7 +7,10 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
   const secret = body?.password ?? body?.apiKey;
   if (!body?.odooUrl || !body?.db || !body?.username || !secret) {
-    return NextResponse.json({ error: "Missing credentials" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing credentials", errorCode: "missing_credentials" },
+      { status: 400 },
+    );
   }
 
   try {
@@ -17,7 +20,10 @@ export async function POST(request: Request) {
         : await login(body.odooUrl, body.db, body.username, secret);
 
     if (!uid) {
-      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+      return NextResponse.json(
+        { error: "Invalid credentials", errorCode: "invalid_credentials" },
+        { status: 401 },
+      );
     }
 
     const sessionId = createSession({
@@ -37,6 +43,6 @@ export async function POST(request: Request) {
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Login failed";
-    return NextResponse.json({ error: message }, { status: 401 });
+    return NextResponse.json({ error: message, errorCode: "login_failed" }, { status: 401 });
   }
 }

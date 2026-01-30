@@ -1,10 +1,12 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
-import { Trash2 } from "lucide-react";
+import { ChevronDown, Github, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import BarcodeSvg from "@/components/BarcodeSvg";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
@@ -32,6 +34,9 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useIsMobile } from "@/hooks/use-mobile";
 import {
   Drawer,
   DrawerClose,
@@ -115,12 +120,14 @@ export default function AppPage() {
   const router = useRouter();
   const locale = useLocale();
   const t = useTranslations("App");
+  const tCommon = useTranslations("Common");
+  const isMobile = useIsMobile();
+  const previewScale = isMobile ? 0.6 : 1;
+  const logoSrc =
+    process.env.NODE_ENV === "development"
+      ? `/brand/labbely-logo.png?ts=${Date.now()}`
+      : "/brand/labbely-logo.png";
   
-  useEffect(() => {
-    console.log("🟣 AppPage - Locale changed to:", locale);
-    console.log("  Translation test - 'undo':", t("undo"));
-    console.log("  Translation test - 'redo':", t("redo"));
-  }, [locale, t]);
   const layout = useEditorStore((state) => state.layout);
   const pages = useEditorStore((state) => state.pages);
   const pagesToRender = useEditorStore((state) => state.pagesToRender);
@@ -153,14 +160,35 @@ export default function AppPage() {
   const [manualError, setManualError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [mode, setMode] = useState<"odoo" | "manual">("manual");
+  const [odooStatus, setOdooStatus] = useState<"checking" | "connected" | "disconnected">(
+    "checking",
+  );
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
+  const [hasAutoModeSync, setHasAutoModeSync] = useState(false);
+  const [recentOdooResults, setRecentOdooResults] = useState<SearchResult[]>([]);
+  const [showGuides, setShowGuides] = useState(false);
+  const [showGuideBanner, setShowGuideBanner] = useState(false);
+  const [layoutOpen, setLayoutOpen] = useState(true);
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
   const [previewPage, setPreviewPage] = useState(1);
   const [showAllPages, setShowAllPages] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const [mobileFillCount, setMobileFillCount] = useState("");
   const [dragSelectState, setDragSelectState] = useState<{
     active: boolean;
     pageIndex: number;
     startIndex: number;
     shouldSelect: boolean;
+  } | null>(null);
+  const longPressRef = useRef<{
+    timer: number | null;
+    startX: number;
+    startY: number;
+    pageIndex: number;
+    cellIndex: number;
+    cellId: string;
+    shouldSelect: boolean;
+    triggered: boolean;
   } | null>(null);
 
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
@@ -178,8 +206,61 @@ export default function AppPage() {
   }, [grid.labelsPerPage, pagesToRender, syncPages]);
 
   useEffect(() => {
+    let isActive = true;
+    const checkSession = async () => {
+      setOdooStatus("checking");
+      try {
+        const response = await fetch("/api/auth/session", {
+          cache: "no-store",
+          credentials: "include",
+        });
+        if (!response.ok) {
+          if (isActive) {
+            setOdooStatus("disconnected");
+          }
+          return;
+        }
+        const payload = (await response.json()) as { authenticated?: boolean };
+        if (isActive) {
+          setOdooStatus(payload.authenticated ? "connected" : "disconnected");
+        }
+      } catch {
+        if (isActive) {
+          setOdooStatus("disconnected");
+        }
+      } finally {
+        if (isActive) {
+          setIsSessionLoading(false);
+        }
+      }
+    };
+
+    void checkSession();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isSessionLoading || hasAutoModeSync) {
+      return;
+    }
+    if (odooStatus === "connected") {
+      setMode("odoo");
+    }
+    setHasAutoModeSync(true);
+  }, [hasAutoModeSync, isSessionLoading, odooStatus]);
+
+  useEffect(() => {
     setPreviewPage((current) => Math.min(Math.max(1, current), pagesToRender));
   }, [pagesToRender]);
+
+  useEffect(() => {
+    if (isMobile) {
+      setShowAllPages(false);
+    }
+  }, [isMobile]);
 
   useEffect(() => {
     if (selectedCellIds.length === 0) {
@@ -189,9 +270,42 @@ export default function AppPage() {
 
   useEffect(() => {
     const handleMouseUp = () => {
-      setDragSelectState(null);
+      if (!isMobile) {
+        setDragSelectState(null);
+      }
+    };
+    const handlePointerUp = () => {
+      if (isMobile) {
+        setDragSelectState(null);
+      }
+      if (longPressRef.current?.timer) {
+        window.clearTimeout(longPressRef.current.timer);
+      }
+      longPressRef.current = null;
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!longPressRef.current || longPressRef.current.triggered) {
+        return;
+      }
+      const dx = Math.abs(event.clientX - longPressRef.current.startX);
+      const dy = Math.abs(event.clientY - longPressRef.current.startY);
+      if (dx > 8 || dy > 8) {
+        if (longPressRef.current.timer) {
+          window.clearTimeout(longPressRef.current.timer);
+        }
+        longPressRef.current = null;
+      }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          (target as HTMLElement).isContentEditable)
+      ) {
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
         event.preventDefault();
         const allIds = pages.flatMap((page) => page.cells.map((cell) => cell.id));
@@ -225,18 +339,84 @@ export default function AppPage() {
       }
     };
     window.addEventListener("mouseup", handleMouseUp);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    window.addEventListener("pointermove", handlePointerMove, { passive: true });
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [clearSelection, clearSelected, pages, redo, selectedCellIds.length, setSelectedCellIds, undo]);
+  }, [clearSelection, clearSelected, isMobile, pages, redo, selectedCellIds.length, setSelectedCellIds, undo]);
+
+  const handleCellPointerDown = (
+    event: React.PointerEvent,
+    pageIndex: number,
+    cellIndex: number,
+    cellId: string,
+    isSelected: boolean
+  ) => {
+    if (!isMobile || event.pointerType === "mouse") {
+      return;
+    }
+    if (longPressRef.current?.timer) {
+      window.clearTimeout(longPressRef.current.timer);
+    }
+    const shouldSelect = !isSelected;
+    const timer = window.setTimeout(() => {
+      setDragSelectState({
+        active: true,
+        pageIndex,
+        startIndex: cellIndex,
+        shouldSelect,
+      });
+      toggleCellSelection(cellId);
+      if (longPressRef.current) {
+        longPressRef.current.triggered = true;
+      }
+    }, 220);
+    longPressRef.current = {
+      timer,
+      startX: event.clientX,
+      startY: event.clientY,
+      pageIndex,
+      cellIndex,
+      cellId,
+      shouldSelect,
+      triggered: false,
+    };
+  };
+
+  const handleCellPointerUp = (cellId: string) => {
+    if (!isMobile) {
+      return;
+    }
+    const current = longPressRef.current;
+    if (current?.timer) {
+      window.clearTimeout(current.timer);
+    }
+    if (current && !current.triggered) {
+      toggleCellSelection(cellId);
+    }
+    longPressRef.current = null;
+    setDragSelectState(null);
+  };
 
   const fetchProducts = async (query: string): Promise<SearchResult[]> => {
     const response = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
     if (!response.ok) {
       const payload = await response.json().catch(() => null);
-      throw new Error(payload?.error ?? t("searchError"));
+      const errorCode = payload?.errorCode ?? payload?.error;
+      if (errorCode === "rate_limited" || errorCode === "Rate limit exceeded") {
+        throw new Error(t("searchRateLimit"));
+      }
+      if (errorCode === "unauthorized" || errorCode === "Unauthorized") {
+        throw new Error(t("searchUnauthorized"));
+      }
+      throw new Error(t("searchError"));
     }
     return response.json();
   };
@@ -246,6 +426,7 @@ export default function AppPage() {
     isFetching,
     isError,
     error,
+    refetch,
   } = useQuery({
     queryKey: ["products", debouncedSearch],
     queryFn: () => fetchProducts(debouncedSearch),
@@ -257,6 +438,25 @@ export default function AppPage() {
   const previewPages = showAllPages
     ? pages
     : pages.filter((_, index) => index === Math.max(0, previewPage - 1));
+  const assignedCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    pages.forEach((page) => {
+      page.cells.forEach((cell) => {
+        if (!cell.productId) {
+          return;
+        }
+        map.set(cell.productId, (map.get(cell.productId) ?? 0) + 1);
+      });
+    });
+    return map;
+  }, [pages]);
+
+  const isDuplicateProduct = (product: Product) =>
+    products.some(
+      (item) =>
+        item.id === product.id ||
+        (item.barcode && product.barcode && item.barcode === product.barcode)
+    );
 
   const addManualProduct = () => {
     setManualError("");
@@ -275,7 +475,12 @@ export default function AppPage() {
       sku: manualSku.trim() || undefined,
       source: "manual",
     };
+    if (isDuplicateProduct(newProduct)) {
+      toast.info(t("productAlreadyAdded"));
+      return;
+    }
     addProduct(newProduct);
+    toast.success(t("productAdded", { name: newProduct.name }));
     setManualName("");
     setManualBarcode("");
     setManualSku("");
@@ -290,7 +495,59 @@ export default function AppPage() {
       sku: result.default_code ?? undefined,
       source: "odoo",
     };
+    if (isDuplicateProduct(newProduct)) {
+      toast.info(t("productAlreadyAdded"));
+      return;
+    }
     addProduct(newProduct);
+    toast.success(t("productAdded", { name: newProduct.name }));
+    setRecentOdooResults((current) => {
+      const deduped = current.filter((item) => item.id !== result.id);
+      return [result, ...deduped].slice(0, 5);
+    });
+  };
+
+  const addSampleProduct = () => {
+    const sampleProduct: Product = {
+      id: `sample-${Date.now()}`,
+      name: t("sampleProductName"),
+      barcode: t("sampleProductBarcode"),
+      sku: t("sampleProductSku"),
+      source: "manual",
+    };
+    if (isDuplicateProduct(sampleProduct)) {
+      toast.info(t("productAlreadyAdded"));
+      return;
+    }
+    addProduct(sampleProduct);
+    toast.success(t("productAdded", { name: sampleProduct.name }));
+  };
+
+  const handlePrint = () => {
+    if (pagesToRender > 3) {
+      const confirmed = window.confirm(t("printConfirm", { count: pagesToRender }));
+      if (!confirmed) {
+        return;
+      }
+    }
+    window.print();
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const seen = window.localStorage.getItem("labbely:guide");
+    if (!seen) {
+      setShowGuideBanner(true);
+    }
+  }, []);
+
+  const dismissGuide = () => {
+    setShowGuideBanner(false);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("labbely:guide", "true");
+    }
   };
 
   const getRangeCellIds = (pageIndex: number, startIndex: number, endIndex: number) => {
@@ -309,6 +566,16 @@ export default function AppPage() {
     cellId: string,
   ) => {
     event.stopPropagation();
+    if (isMobile) {
+      const isSelected = selectedCellIds.includes(cellId);
+      if (isSelected) {
+        setSelectedCellIds(selectedCellIds.filter((id) => id !== cellId));
+      } else {
+        setSelectedCellIds([cellId]);
+      }
+      setDragSelectState(null);
+      return;
+    }
     // No hacer nada si es clic derecho
     if (event.button === 2) {
       return;
@@ -349,6 +616,9 @@ export default function AppPage() {
   };
 
   const handleCellMouseEnter = (pageIndex: number, cellIndex: number, cellId: string) => {
+    if (isMobile) {
+      return;
+    }
     if (!dragSelectState?.active || dragSelectState.pageIndex !== pageIndex) {
       return;
     }
@@ -383,102 +653,209 @@ export default function AppPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="no-print border-b border-slate-200 bg-white px-8 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-              {t("brand")}
-            </p>
-            <span className="text-xs text-slate-400">/</span>
-            <h1 className="text-sm font-semibold text-slate-900">{t("editorTitle")}</h1>
+      {isSessionLoading ? (
+        <div className="fixed inset-0 z-[900] bg-white">
+          <div className="flex min-h-svh flex-col items-center justify-center gap-6 px-6 text-center">
+            <img
+              src="/brand/labbely-icon.png"
+              alt="Labbely"
+              width={56}
+              height={56}
+              className="h-14 w-14"
+              loading="eager"
+              decoding="async"
+            />
+            <div className="space-y-2">
+              <div className="mx-auto h-4 w-56 rounded-full bg-slate-200/90 animate-pulse" />
+              <div className="mx-auto h-3 w-40 rounded-full bg-slate-100 animate-pulse" />
+            </div>
+            <div className="flex items-center gap-3 text-sm text-slate-600">
+              <Spinner className="h-4 w-4" />
+              <span>{t("loading")}</span>
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Drawer>
-              <DrawerTrigger asChild>
-                <Button variant="outline" size="sm" className="lg:hidden">
-                  {t("controls")}
-                </Button>
-              </DrawerTrigger>
-              <DrawerContent>
-                <DrawerHeader>
-                  <DrawerTitle>{t("controls")}</DrawerTitle>
-                </DrawerHeader>
-                <ScrollArea className="max-h-[70vh] px-4 pb-6">
-                  <div className="space-y-6">
-                    <SidebarContent
-                      mode={mode}
-                      onModeChange={handleModeChange}
-                      searchQuery={searchQuery}
-                      setSearchQuery={setSearchQuery}
-                      isFetching={isFetching}
-                      isError={isError}
-                      error={error}
-                      searchResults={searchResults}
-                      addOdooProduct={addOdooProduct}
-                      manualName={manualName}
-                      manualBarcode={manualBarcode}
-                      manualSku={manualSku}
-                      manualError={manualError}
-                      setManualName={setManualName}
-                      setManualBarcode={setManualBarcode}
-                      setManualSku={setManualSku}
-                      addManualProduct={addManualProduct}
-                      products={products}
-                      activeProductId={activeProductId}
-                      setActiveProductId={setActiveProductId}
-                      fillNextAvailable={fillNextAvailable}
-                      fillNextAvailableCount={fillNextAvailableCount}
-                      fillAllPages={fillAllPages}
-                      removeProduct={removeProduct}
-                      selectedCellIds={selectedCellIds}
-                      popoverOpen={popoverOpen}
-                      setPopoverOpen={setPopoverOpen}
-                      assignToSelected={assignToSelected}
-                    />
-                    <div className="border-t border-slate-200 pt-4">
-                      <LayoutPanel
-                        layout={layout}
-                        setLayout={setLayout}
-                        pagesToRender={pagesToRender}
-                        setPagesToRender={setPagesToRender}
-                      />
-                    </div>
-                    <DrawerClose asChild>
-                      <Button variant="outline" size="sm" className="w-full">
-                        {t("close")}
+        </div>
+      ) : null}
+      <div
+        className={`transition-opacity duration-150 ${isSessionLoading ? "opacity-0" : "opacity-100"}`}
+      >
+        <header className="no-print border-b border-slate-200 bg-white px-6 py-4 sm:px-8">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center justify-between gap-3">
+            <Link href={`/${locale}`} aria-label="Labbely home">
+              <img
+                src={logoSrc}
+                alt="Labbely"
+                width={200}
+                height={48}
+                className="h-8 w-auto"
+                loading="eager"
+                decoding="async"
+              />
+            </Link>
+            <div className="flex items-center gap-2 sm:hidden">
+              <LanguageSwitcher />
+              <a
+                href="https://github.com/dani-mas/labbely"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 transition hover:bg-slate-100"
+                aria-label={tCommon("github")}
+              >
+                <Github className="h-4 w-4" />
+              </a>
+            </div>
+          </div>
+          <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <a
+                  href="https://github.com/dani-mas/labbely"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hidden h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 transition hover:bg-slate-100 sm:inline-flex"
+                  aria-label={tCommon("github")}
+                >
+                  <Github className="h-4 w-4" />
+                </a>
+              </TooltipTrigger>
+              <TooltipContent>{tCommon("github")}</TooltipContent>
+            </Tooltip>
+            {isMobile ? (
+              <>
+                <div className="flex w-full items-center rounded-full border border-slate-200 bg-white p-1 shadow-sm">
+                  <Drawer>
+                    <DrawerTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="flex-1 rounded-full px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        {t("mobileProducts")}
                       </Button>
-                    </DrawerClose>
-                  </div>
-                </ScrollArea>
-              </DrawerContent>
-            </Drawer>
-            <LanguageSwitcher />
-            <Button variant="ghost" size="sm" onClick={undo}>
-              {t("undo")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={redo}>
-              {t("redo")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={clearAll}>
-              {t("clearAll")}
-            </Button>
-            <Button size="sm" onClick={() => window.print()}>
-              {t("print")}
+                    </DrawerTrigger>
+                    <DrawerContent className="max-h-[85vh] overflow-hidden">
+                      <DrawerHeader>
+                        <DrawerTitle>{t("mobileProducts")}</DrawerTitle>
+                      </DrawerHeader>
+                      <ScrollArea className="h-[65vh] px-4 pb-6">
+                        <SidebarContent
+                          mode={mode}
+                          onModeChange={handleModeChange}
+                          odooStatus={odooStatus}
+                          locale={locale}
+                          recentOdooResults={recentOdooResults}
+                          searchQuery={searchQuery}
+                          setSearchQuery={setSearchQuery}
+                          isFetching={isFetching}
+                          isError={isError}
+                          error={error}
+                        refetch={refetch}
+                          searchResults={searchResults}
+                          addOdooProduct={addOdooProduct}
+                          manualName={manualName}
+                          manualBarcode={manualBarcode}
+                          manualSku={manualSku}
+                          manualError={manualError}
+                          setManualName={setManualName}
+                          setManualBarcode={setManualBarcode}
+                          setManualSku={setManualSku}
+                          addManualProduct={addManualProduct}
+                          addSampleProduct={addSampleProduct}
+                          products={products}
+                          activeProductId={activeProductId}
+                          setActiveProductId={setActiveProductId}
+                          fillNextAvailable={fillNextAvailable}
+                          fillNextAvailableCount={fillNextAvailableCount}
+                          fillAllPages={fillAllPages}
+                          removeProduct={removeProduct}
+                          selectedCellIds={selectedCellIds}
+                          popoverOpen={popoverOpen}
+                          setPopoverOpen={setPopoverOpen}
+                          assignToSelected={assignToSelected}
+                          assignedCounts={assignedCounts}
+                          isMobile={true}
+                        />
+                        <DrawerClose asChild>
+                          <Button variant="outline" size="sm" className="mt-4 w-full">
+                            {t("close")}
+                          </Button>
+                        </DrawerClose>
+                      </ScrollArea>
+                    </DrawerContent>
+                  </Drawer>
+                  <span className="mx-1 h-5 w-px bg-slate-200" />
+                  <Drawer>
+                    <DrawerTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="flex-1 rounded-full px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        {t("layoutTitle")}
+                      </Button>
+                    </DrawerTrigger>
+                    <DrawerContent className="max-h-[85vh] overflow-hidden">
+                      <DrawerHeader>
+                        <DrawerTitle>{t("layoutTitle")}</DrawerTitle>
+                      </DrawerHeader>
+                      <ScrollArea className="h-[65vh] px-4 pb-6">
+                        <LayoutPanel
+                          layout={layout}
+                          setLayout={setLayout}
+                          pagesToRender={pagesToRender}
+                          setPagesToRender={setPagesToRender}
+                          selectedPresetId={selectedPresetId}
+                          setSelectedPresetId={setSelectedPresetId}
+                        />
+                        <DrawerClose asChild>
+                          <Button variant="outline" size="sm" className="mt-4 w-full">
+                            {t("close")}
+                          </Button>
+                        </DrawerClose>
+                      </ScrollArea>
+                    </DrawerContent>
+                  </Drawer>
+                </div>
+              </>
+            ) : null}
+            <div className="hidden sm:block">
+              <LanguageSwitcher />
+            </div>
+            <span className="mx-1 hidden h-5 w-px bg-slate-200 sm:inline-flex" />
+            <div className="hidden items-center gap-1 sm:flex">
+              <Button variant="ghost" size="sm" onClick={undo}>
+                {t("undo")}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={redo}>
+                {t("redo")}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={clearAll}>
+                {t("clearAll")}
+              </Button>
+            </div>
+            <span className="mx-1 hidden h-5 w-px bg-slate-200 sm:inline-flex" />
+            <Button size="sm" className="hidden sm:inline-flex" onClick={handlePrint}>
+              {t("printLabels")}
             </Button>
           </div>
         </div>
       </header>
-      <main className="flex w-full max-w-none flex-col items-stretch gap-0 px-0 py-0 lg:flex-row">
+      <main className="flex w-full max-w-none flex-col items-stretch gap-0 px-0 py-0 pb-20 lg:pb-0 lg:flex-row">
         <aside className="no-print order-1 hidden w-full lg:block lg:w-96 lg:shrink-0">
           <div className="flex h-full min-h-[calc(100vh-56px)] flex-col space-y-6 border-r border-slate-200 bg-white px-6 py-4">
             <SidebarContent
               mode={mode}
               onModeChange={handleModeChange}
+              odooStatus={odooStatus}
+              locale={locale}
+                      recentOdooResults={recentOdooResults}
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
               isFetching={isFetching}
               isError={isError}
               error={error}
+              refetch={refetch}
               searchResults={searchResults}
               addOdooProduct={addOdooProduct}
               manualName={manualName}
@@ -489,6 +866,7 @@ export default function AppPage() {
               setManualBarcode={setManualBarcode}
               setManualSku={setManualSku}
               addManualProduct={addManualProduct}
+              addSampleProduct={addSampleProduct}
               products={products}
               activeProductId={activeProductId}
               setActiveProductId={setActiveProductId}
@@ -500,11 +878,26 @@ export default function AppPage() {
               popoverOpen={popoverOpen}
               setPopoverOpen={setPopoverOpen}
               assignToSelected={assignToSelected}
+              assignedCounts={assignedCounts}
+              isMobile={isMobile}
             />
           </div>
         </aside>
         <section className="no-print order-2 flex-1 space-y-4 px-6 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          {showGuideBanner ? (
+            <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-semibold text-slate-900">{t("guideTitle")}</p>
+                  <p className="text-xs text-slate-500">{t("guideDescription")}</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={dismissGuide}>
+                  {t("guideDismiss")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-500">
                 {t("preview")}
@@ -517,18 +910,28 @@ export default function AppPage() {
                 })}
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-              <span>
-                {t("layoutSummary", {
-                  width: layout.paperWidthCm,
-                  height: layout.paperHeightCm,
-                })}
-              </span>
-              <div className="flex items-center gap-2">
-                <span>{t("showAllPages")}</span>
-                <Switch checked={showAllPages} onCheckedChange={setShowAllPages} />
-              </div>
-              {!showAllPages ? (
+            <div className="flex flex-col gap-2 text-xs text-slate-500 sm:flex-row sm:items-center">
+              {!isMobile ? (
+                <span>
+                  {t("layoutSummary", {
+                    width: layout.paperWidthCm,
+                    height: layout.paperHeightCm,
+                  })}
+                </span>
+              ) : null}
+              {!isMobile ? (
+                <div className="flex items-center gap-2">
+                  <span>{t("showGuides")}</span>
+                  <Switch checked={showGuides} onCheckedChange={setShowGuides} />
+                </div>
+              ) : null}
+              {!isMobile ? (
+                <div className="flex items-center gap-2">
+                  <span>{t("showAllPages")}</span>
+                  <Switch checked={showAllPages} onCheckedChange={setShowAllPages} />
+                </div>
+              ) : null}
+              {!showAllPages && !isMobile ? (
                 <div className="min-w-[140px]">
                   <Select
                     value={String(previewPage)}
@@ -549,28 +952,144 @@ export default function AppPage() {
               ) : null}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>{t("hintClick")}</span>
-            <Kbd>Shift</Kbd>
-            <span>{t("hintRange")}</span>
-            <Kbd>Ctrl</Kbd>
-            <span>{t("hintToggle")}</span>
-            <Kbd>Esc</Kbd>
-            <span>{t("hintClear")}</span>
-          </div>
+          {isMobile ? (
+            <div className="space-y-3 rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm">
+              <div className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+                {t("productsAdded")}
+              </div>
+              {products.length === 0 ? (
+                <p className="text-xs text-slate-500">{t("productsAddedEmpty")}</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {products.map((product) => (
+                    <Button
+                      key={product.id}
+                      size="sm"
+                      variant={activeProductId === product.id ? "default" : "outline"}
+                      className="h-8"
+                      onClick={() => setActiveProductId(product.id)}
+                    >
+                      {(product.name || t("unnamedProduct")).slice(0, 12)}
+                    </Button>
+                  ))}
+                </div>
+              )}
+              {activeProductId ? (
+                <div className="space-y-2 border-t border-slate-200 pt-3">
+                  <div className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+                    {t("quickActions")}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        fillNextAvailableCount(
+                          activeProductId,
+                          Math.ceil(grid.labelsPerPage / 2)
+                        )
+                      }
+                    >
+                      {t("halfPage")} · {Math.ceil(grid.labelsPerPage / 2)}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => fillNextAvailableCount(activeProductId, grid.labelsPerPage)}
+                    >
+                      {t("fullPage")} · {grid.labelsPerPage}
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={grid.labelsPerPage}
+                      value={mobileFillCount}
+                      onChange={(event) => setMobileFillCount(event.target.value)}
+                      placeholder={t("customQuantity")}
+                      className="h-8 w-24 text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        const count = Number(mobileFillCount);
+                        if (!Number.isNaN(count) && count > 0) {
+                          fillNextAvailableCount(activeProductId, count);
+                        }
+                      }}
+                    >
+                      {t("applyQuantity")}
+                    </Button>
+                    <span className="text-xs text-slate-500">
+                      {t("labelsCount", {
+                        count: mobileFillCount ? Number(mobileFillCount) : 0,
+                      })}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {!isMobile ? (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span>{t("hintClick")}</span>
+              <Kbd>Shift</Kbd>
+              <span>{t("hintRange")}</span>
+              <Kbd>Ctrl</Kbd>
+              <span>{t("hintToggle")}</span>
+              <Kbd>Esc</Kbd>
+              <span>{t("hintClear")}</span>
+              <span className="text-slate-400">·</span>
+              <span>{t("printHint")}</span>
+            </div>
+          ) : null}
+          {selectedCellIds.length > 0 ? (
+            <div className="hidden flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs sm:flex">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-slate-700">
+                  {t("selectionCount", { count: selectedCellIds.length })}
+                </span>
+                {activeProduct ? (
+                  <Badge variant="secondary" title={activeProduct.name}>
+                    {t("activeProduct")} · {activeProduct.name}
+                  </Badge>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => activeProductId && assignToSelected(activeProductId)}
+                  disabled={!activeProductId}
+                >
+                  {t("assignActiveProduct")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
           <div className="space-y-6">
             {previewPages.map((page) => {
               const pageIndex = Math.max(0, pages.findIndex((item) => item.id === page.id));
               return (
-              <div key={page.id} className="overflow-auto rounded-2xl border border-slate-200 bg-white p-6">
+              <div key={page.id} className="overflow-auto border border-slate-200 bg-white p-4 sm:p-6">
                 <div
-                  className="relative mx-auto bg-white"
+                  className="relative mx-auto"
                   style={{
-                    width: `${layout.paperWidthCm}cm`,
-                    height: `${layout.paperHeightCm}cm`,
-                    padding: `${layout.marginCm}cm`,
+                    width: `${layout.paperWidthCm * previewScale}cm`,
+                    height: `${layout.paperHeightCm * previewScale}cm`,
                   }}
                 >
+                  <div
+                    className="relative bg-white"
+                    style={{
+                      width: `${layout.paperWidthCm}cm`,
+                      height: `${layout.paperHeightCm}cm`,
+                      padding: `${layout.marginCm}cm`,
+                      transform: `scale(${previewScale})`,
+                      transformOrigin: "top left",
+                      boxShadow: showGuides ? "inset 0 0 0 1px rgba(14, 94, 245, 0.25)" : undefined,
+                    }}
+                  >
                   <div
                     className="grid select-none"
                     onMouseDown={(event) => {
@@ -597,6 +1116,7 @@ export default function AppPage() {
                         <LabelCell
                           key={cell.id}
                           cellId={cell.id}
+                          labelIndex={cellIndex + 1}
                           product={product}
                           isSelected={isSelected}
                           activeProductId={activeProductId}
@@ -605,6 +1125,15 @@ export default function AppPage() {
                             handleCellMouseDown(event, pageIndex, cellIndex, cell.id)
                           }
                           onMouseEnter={() => handleCellMouseEnter(pageIndex, cellIndex, cell.id)}
+                          onPointerDown={(event) =>
+                            handleCellPointerDown(event, pageIndex, cellIndex, cell.id, isSelected)
+                          }
+                          onPointerEnter={() =>
+                            isMobile && dragSelectState?.active
+                              ? handleCellMouseEnter(pageIndex, cellIndex, cell.id)
+                              : null
+                          }
+                          onPointerUp={() => handleCellPointerUp(cell.id)}
                           onClear={() => clearCell(cell.id)}
                           onClearSelected={() => clearSelected()}
                           onAssignSelected={() =>
@@ -620,6 +1149,7 @@ export default function AppPage() {
                       );
                     })}
                   </div>
+                  </div>
                 </div>
               </div>
             );
@@ -628,15 +1158,49 @@ export default function AppPage() {
         </section>
         <aside className="no-print order-3 hidden w-full lg:block lg:w-80 lg:shrink-0">
           <div className="flex h-full min-h-[calc(100vh-56px)] flex-col space-y-6 border-l border-slate-200 bg-white px-6 py-4">
-            <LayoutPanel
-              layout={layout}
-              setLayout={setLayout}
-              pagesToRender={pagesToRender}
-              setPagesToRender={setPagesToRender}
-            />
+            <Collapsible open={layoutOpen} onOpenChange={setLayoutOpen}>
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+                  {t("layoutTitle")}
+                </h3>
+                <CollapsibleTrigger asChild>
+                  <Button variant="ghost" size="icon-sm" aria-label={t("toggleLayout")}>
+                    <ChevronDown className={`h-4 w-4 transition ${layoutOpen ? "rotate-180" : ""}`} />
+                  </Button>
+                </CollapsibleTrigger>
+              </div>
+              <CollapsibleContent className="pt-3">
+                <LayoutPanel
+                  layout={layout}
+                  setLayout={setLayout}
+                  pagesToRender={pagesToRender}
+                  setPagesToRender={setPagesToRender}
+                  selectedPresetId={selectedPresetId}
+                  setSelectedPresetId={setSelectedPresetId}
+                />
+              </CollapsibleContent>
+            </Collapsible>
           </div>
         </aside>
       </main>
+      <div className="no-print lg:hidden fixed bottom-0 inset-x-0 border-t border-slate-200 bg-white px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" className="flex-1" onClick={clearAll}>
+            {t("clearAll")}
+          </Button>
+          <Button
+            size="sm"
+            className="hidden flex-1 sm:inline-flex"
+            onClick={() => activeProductId && assignToSelected(activeProductId)}
+            disabled={!activeProductId || selectedCellIds.length === 0}
+          >
+            {t("assignActiveProduct")}
+          </Button>
+          <Button size="sm" className="flex-1" onClick={handlePrint}>
+            {t("printLabels")}
+          </Button>
+        </div>
+      </div>
       <PrintArea
         layout={layout}
         grid={grid}
@@ -649,11 +1213,13 @@ export default function AppPage() {
         <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 pt-4 text-xs text-muted-foreground">
           <div className="flex flex-wrap items-center gap-2">
             <span>{t("selectedLabels")}</span>
-            <Badge variant="secondary">{selectedCellIds.length}</Badge>
+            <Badge variant="brand">{selectedCellIds.length}</Badge>
             <span>{t("activeProduct")}</span>
             <span className="font-semibold text-slate-800">
               {activeProduct ? activeProduct.name : t("none")}
             </span>
+            <span className="text-slate-300">•</span>
+            <span>{t("selectionHint")}</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span>{t("shortcutsTitle")}</span>
@@ -666,6 +1232,7 @@ export default function AppPage() {
           </div>
         </div>
       </div>
+      </div>
     </div>
   );
 }
@@ -673,6 +1240,7 @@ export default function AppPage() {
 function ProductCard({
   product,
   active,
+  assignedCount,
   onSelect,
   onFillNext,
   onFillMany,
@@ -681,6 +1249,7 @@ function ProductCard({
 }: {
   product: Product;
   active: boolean;
+  assignedCount: number;
   onSelect: () => void;
   onFillNext: () => void;
   onFillMany: (count: number) => void;
@@ -692,8 +1261,8 @@ function ProductCard({
 
   return (
     <div
-      className={`relative rounded-lg border px-3 py-2 text-xs select-none ${
-        active ? "border-slate-400 bg-slate-50" : "border-slate-200"
+      className={`relative rounded-lg border px-3 py-2 text-xs select-none transition-colors hover:border-primary/30 ${
+        active ? "border-primary/40 bg-primary/5" : "border-slate-200"
       }`}
       onClick={onSelect}
       onKeyDown={(event) => event.key === "Enter" && onSelect()}
@@ -701,64 +1270,85 @@ function ProductCard({
       <Button
         variant="ghost"
         size="icon"
-        className="absolute right-2 top-2 h-6 w-6 text-slate-400 hover:text-rose-600"
+        className="absolute right-2 top-2 h-8 w-8 text-slate-400 hover:text-rose-600"
         onClick={(event) => {
           event.stopPropagation();
           onRemove();
         }}
+        aria-label={t("removeProduct")}
       >
         <Trash2 className="h-3.5 w-3.5" />
       </Button>
-      <p className="font-semibold text-slate-800">{product.name}</p>
-      <p className="text-slate-500 text-[10px]">
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-semibold text-slate-800 truncate">{product.name}</p>
+        <Badge variant="secondary" title={t("assignedCount", { count: assignedCount })}>
+          {assignedCount}
+        </Badge>
+      </div>
+      <p className="text-slate-500 text-[10px] font-mono">
         {t("barcodeLabel")} {product.barcode || t("notAvailable")}
       </p>
       <div className="mt-2 space-y-2">
         <div className="flex gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="flex-1 text-[10px] h-7"
-            onClick={(event) => {
-              event.stopPropagation();
-              onFillNext();
-            }}
-          >
-            {t("fillNext")}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="flex-1 text-[10px] h-7"
-            onClick={(event) => {
-              event.stopPropagation();
-              onFillAll();
-            }}
-          >
-            {t("fillAllPages")}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-9"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onFillNext();
+                }}
+              >
+                {t("fillNext")}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("fillNextHint")}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-9"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onFillAll();
+                }}
+              >
+                {t("fillAllPages")}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("fillAllHint")}</TooltipContent>
+          </Tooltip>
         </div>
         <div className="flex gap-2">
           <Input
-            className="h-7 w-14 text-[10px]"
+            className="h-9 w-16 text-[10px]"
             type="number"
             min={1}
             value={quantity}
             onClick={(event) => event.stopPropagation()}
             onChange={(event) => setQuantity(Number(event.target.value) || 1)}
           />
-          <Button
-            variant="outline"
-            size="sm"
-            className="flex-1 text-[10px] h-7"
-            onClick={(event) => {
-              event.stopPropagation();
-              const safeQty = Number.isFinite(quantity) ? Math.max(1, quantity) : 1;
-              onFillMany(safeQty);
-            }}
-          >
-            {t("fillCount", { count: quantity })}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-9"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  const safeQty = Number.isFinite(quantity) ? Math.max(1, quantity) : 1;
+                  onFillMany(safeQty);
+                }}
+              >
+                {t("fillCount", { count: quantity })}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("fillCountHint")}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </div>
@@ -768,11 +1358,15 @@ function ProductCard({
 type SidebarContentProps = {
   mode: "odoo" | "manual";
   onModeChange: (value: string) => void;
+  odooStatus: "checking" | "connected" | "disconnected";
+  locale: string;
+  recentOdooResults: SearchResult[];
   searchQuery: string;
   setSearchQuery: (value: string) => void;
   isFetching: boolean;
   isError: boolean;
   error: unknown;
+  refetch: () => void;
   searchResults: SearchResult[];
   addOdooProduct: (result: SearchResult) => void;
   manualName: string;
@@ -783,7 +1377,9 @@ type SidebarContentProps = {
   setManualBarcode: (value: string) => void;
   setManualSku: (value: string) => void;
   addManualProduct: () => void;
+  addSampleProduct: () => void;
   products: Product[];
+  assignedCounts: Map<string, number>;
   activeProductId: string | null;
   setActiveProductId: (value: string | null) => void;
   fillNextAvailable: (productId: string) => void;
@@ -794,16 +1390,21 @@ type SidebarContentProps = {
   popoverOpen: boolean;
   setPopoverOpen: (value: boolean) => void;
   assignToSelected: (productId: string) => void;
+  isMobile: boolean;
 };
 
 function SidebarContent({
   mode,
   onModeChange,
+  odooStatus,
+  locale,
+  recentOdooResults,
   searchQuery,
   setSearchQuery,
   isFetching,
   isError,
   error,
+  refetch,
   searchResults,
   addOdooProduct,
   manualName,
@@ -814,7 +1415,9 @@ function SidebarContent({
   setManualBarcode,
   setManualSku,
   addManualProduct,
+  addSampleProduct,
   products,
+  assignedCounts,
   activeProductId,
   setActiveProductId,
   fillNextAvailable,
@@ -825,6 +1428,7 @@ function SidebarContent({
   popoverOpen,
   setPopoverOpen,
   assignToSelected,
+  isMobile,
 }: SidebarContentProps) {
   const t = useTranslations("App");
 
@@ -836,12 +1440,39 @@ function SidebarContent({
             {t("mode")}
           </h2>
           <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="odoo">{t("modeOdoo")}</TabsTrigger>
-            <TabsTrigger value="manual">{t("modeManual")}</TabsTrigger>
+            <TabsTrigger value="odoo" className="cursor-pointer">
+              {t("modeOdoo")}
+            </TabsTrigger>
+            <TabsTrigger value="manual" className="cursor-pointer">
+              {t("modeManual")}
+            </TabsTrigger>
           </TabsList>
+          <p className="text-xs text-muted-foreground">
+            {mode === "odoo" ? t("modeOdooHelp") : t("modeManualHelp")}
+          </p>
         </div>
         <TabsContent value="odoo" className="mt-4 space-y-2">
           <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-xs">
+              <span className="text-slate-600">{t("odooConnection")}</span>
+              <div className="flex items-center gap-2">
+                <Badge variant={odooStatus === "connected" ? "brand" : "secondary"}>
+                  {odooStatus === "connected"
+                    ? t("odooStatusConnected")
+                    : odooStatus === "checking"
+                      ? t("odooStatusChecking")
+                      : t("odooStatusDisconnected")}
+                </Badge>
+                {odooStatus === "disconnected" ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={`/${locale}/login`}>{t("odooLoginCta")}</Link>
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+            {odooStatus === "disconnected" ? (
+              <p className="text-xs text-muted-foreground">{t("odooLoginHelp")}</p>
+            ) : null}
             <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
               {t("searchTitle")}
             </div>
@@ -864,32 +1495,81 @@ function SidebarContent({
             <ScrollArea className="h-56 rounded-md border">
               <div className="space-y-2 p-2">
                 {searchQuery.trim().length <= 1 ? (
-                  <p className="text-xs text-muted-foreground">{t("searchHintMinChars")}</p>
-                ) : isError ? (
-                  <p className="text-xs text-destructive">
-                    {(error as Error)?.message ?? t("searchError")}
-                  </p>
-                ) : searchResults.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">{t("searchEmpty")}</p>
-                ) : (
-                  searchResults.map((result) => (
-                    <div
-                      key={result.id}
-                      className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-2 py-2 hover:bg-slate-50"
-                    >
-                      <div>
-                        <p className="text-xs font-semibold">
-                          {result.display_name ?? result.name ?? t("unnamedProduct")}
+                  <div className="space-y-2 text-xs text-muted-foreground">
+                    <p>{t("searchHintMinChars")}</p>
+                    {recentOdooResults.length > 0 ? (
+                      <div className="space-y-2">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                          {t("recentProducts")}
                         </p>
-                        <p className="text-[11px] text-muted-foreground">
-                          {result.barcode || t("noBarcode")}
-                        </p>
+                        {recentOdooResults.map((result) => (
+                          <div
+                            key={result.id}
+                            className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-2 py-2 hover:bg-slate-50"
+                          >
+                            <div>
+                              <p className="text-xs font-semibold text-slate-700">
+                                {result.display_name ?? result.name ?? t("unnamedProduct")}
+                              </p>
+                              <p className="text-[11px] font-mono text-muted-foreground">
+                                {result.barcode || t("noBarcode")}
+                              </p>
+                            </div>
+                            <Button size="sm" variant="secondary" onClick={() => addOdooProduct(result)}>
+                              {t("addProduct")}
+                            </Button>
+                          </div>
+                        ))}
                       </div>
-                      <Button size="sm" variant="secondary" onClick={() => addOdooProduct(result)}>
-                        {t("addProduct")}
-                      </Button>
+                    ) : null}
+                  </div>
+                ) : isError ? (
+                  <div className="space-y-2 text-xs text-destructive">
+                    <p>{(error as Error)?.message ?? t("searchError")}</p>
+                    <Button size="sm" variant="outline" onClick={() => refetch()}>
+                      {t("searchRetry")}
+                    </Button>
+                  </div>
+                ) : isFetching && searchResults.length === 0 ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <div
+                        key={`skeleton-${index}`}
+                        className="h-12 rounded-md border border-slate-200 bg-slate-50 animate-pulse"
+                      />
+                    ))}
+                  </div>
+                ) : searchResults.length === 0 ? (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>{t("searchEmpty")}</p>
+                    <p>{t("searchEmptyHint")}</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-[1fr_auto] gap-2 px-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                      <span>{t("searchHeaderName")}</span>
+                      <span>{t("searchHeaderCode")}</span>
                     </div>
-                  ))
+                    {searchResults.map((result) => (
+                      <div
+                        key={result.id}
+                        className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-2 py-2 hover:bg-slate-50"
+                      >
+                        <div>
+                          <p className="text-xs font-semibold">
+                            {result.display_name ?? result.name ?? t("unnamedProduct")}
+                          </p>
+                          <p className="text-[11px] font-mono text-muted-foreground">
+                            {result.barcode || t("noBarcode")} ·{" "}
+                            {result.default_code || t("noSku")}
+                          </p>
+                        </div>
+                        <Button size="sm" variant="secondary" onClick={() => addOdooProduct(result)}>
+                          {t("addProduct")}
+                        </Button>
+                      </div>
+                    ))}
+                  </>
                 )}
               </div>
             </ScrollArea>
@@ -937,36 +1617,45 @@ function SidebarContent({
           </div>
         </TabsContent>
       </Tabs>
-      <div className="space-y-3">
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-          {t("products")}
-        </h3>
-        <div className="space-y-2">
-          {products.length === 0 ? (
-            <p className="text-xs text-slate-500">{t("productsEmpty")}</p>
-          ) : (
-            products.map((product) => (
-              <ProductCard
-                key={product.id}
-                product={product}
-                active={product.id === activeProductId}
-                onSelect={() => setActiveProductId(product.id)}
-                onFillNext={() => fillNextAvailable(product.id)}
-                onFillMany={(count) => fillNextAvailableCount(product.id, count)}
-                onFillAll={() => fillAllPages(product.id)}
-                onRemove={() => removeProduct(product.id)}
-              />
-            ))
-          )}
+      {!isMobile ? (
+        <div className="space-y-3">
+          <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+            {t("products")}
+          </h3>
+          <div className="space-y-2">
+            {products.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-600">
+                <p className="font-semibold text-slate-800">{t("productsEmptyTitle")}</p>
+                <p className="mt-1 text-slate-500">{t("productsEmptyHelp")}</p>
+                <Button variant="outline" size="sm" className="mt-3 w-full" onClick={addSampleProduct}>
+                  {t("productsEmptyCta")}
+                </Button>
+              </div>
+            ) : (
+              products.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  active={product.id === activeProductId}
+                  assignedCount={assignedCounts.get(product.id) ?? 0}
+                  onSelect={() => setActiveProductId(product.id)}
+                  onFillNext={() => fillNextAvailable(product.id)}
+                  onFillMany={(count) => fillNextAvailableCount(product.id, count)}
+                  onFillAll={() => fillAllPages(product.id)}
+                  onRemove={() => removeProduct(product.id)}
+                />
+              ))
+            )}
+          </div>
         </div>
-      </div>
-      {selectedCellIds.length > 0 && products.length > 0 ? (
+      ) : null}
+      {!isMobile && selectedCellIds.length > 0 && products.length > 0 ? (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
               {t("assignToSelected")}
             </h3>
-            <Badge variant="secondary">{selectedCellIds.length}</Badge>
+            <Badge variant="brand">{selectedCellIds.length}</Badge>
           </div>
           <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
             <PopoverTrigger asChild>
@@ -996,7 +1685,7 @@ function SidebarContent({
                           <span className="text-xs font-semibold text-slate-800 truncate w-full">
                             {product.name}
                           </span>
-                          <span className="text-[10px] text-slate-500">
+                          <span className="text-[10px] font-mono text-slate-500">
                             {product.barcode || t("noBarcode")}
                           </span>
                         </div>
@@ -1018,22 +1707,47 @@ type LayoutPanelProps = {
   setLayout: (layout: LayoutSettings) => void;
   pagesToRender: number;
   setPagesToRender: (count: number) => void;
+  selectedPresetId: string | null;
+  setSelectedPresetId: (value: string | null) => void;
 };
 
-function LayoutPanel({ layout, setLayout, pagesToRender, setPagesToRender }: LayoutPanelProps) {
+function LayoutPanel({
+  layout,
+  setLayout,
+  pagesToRender,
+  setPagesToRender,
+  selectedPresetId,
+  setSelectedPresetId,
+}: LayoutPanelProps) {
   const t = useTranslations("App");
+  const activePreset = selectedPresetId
+    ? PRESET_LAYOUTS.find((item) => item.id === selectedPresetId)
+    : null;
 
   return (
-    <div className="space-y-3">
-      <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-        {t("layoutTitle")}
-      </h3>
-      <div className="space-y-2 text-xs">
-        <Label>{t("layoutPresets")}</Label>
+    <div className="space-y-4 text-xs">
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label>{t("layoutPresets")}</Label>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!activePreset}
+            onClick={() => {
+              if (activePreset) {
+                setLayout({ ...layout, ...activePreset.values });
+              }
+            }}
+          >
+            {t("resetPreset")}
+          </Button>
+        </div>
         <Select
+          value={selectedPresetId ?? undefined}
           onValueChange={(value) => {
             const preset = PRESET_LAYOUTS.find((item) => item.id === value);
             if (preset) {
+              setSelectedPresetId(preset.id);
               setLayout({ ...layout, ...preset.values });
             }
           }}
@@ -1044,160 +1758,195 @@ function LayoutPanel({ layout, setLayout, pagesToRender, setPagesToRender }: Lay
           <SelectContent>
             {PRESET_LAYOUTS.map((preset) => (
               <SelectItem key={preset.id} value={preset.id}>
-                {t(preset.labelKey)}
+                <div className="flex w-full items-center justify-between gap-2">
+                  <span>{t(preset.labelKey)}</span>
+                  {preset.id === "a4-4x13" ? (
+                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                      {t("recommended")}
+                    </span>
+                  ) : null}
+                </div>
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-3 text-xs">
-        <div className="space-y-2">
-          <Label htmlFor="paper-width">{t("layoutPaperWidth")}</Label>
-          <Input
-            id="paper-width"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.paperWidthCm}
-            onChange={(event) => setLayout({ ...layout, paperWidthCm: Number(event.target.value) })}
-          />
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {t("layoutSectionPaper")}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="paper-width">{t("layoutPaperWidth")} (cm)</Label>
+            <Input
+              id="paper-width"
+              type="number"
+              step="0.1"
+              value={layout.paperWidthCm}
+              onChange={(event) => setLayout({ ...layout, paperWidthCm: Number(event.target.value) })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="paper-height">{t("layoutPaperHeight")} (cm)</Label>
+            <Input
+              id="paper-height"
+              type="number"
+              step="0.1"
+              value={layout.paperHeightCm}
+              onChange={(event) => setLayout({ ...layout, paperHeightCm: Number(event.target.value) })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="margin">{t("layoutMargin")} (cm)</Label>
+            <Input
+              id="margin"
+              type="number"
+              step="0.1"
+              value={layout.marginCm}
+              onChange={(event) => setLayout({ ...layout, marginCm: Number(event.target.value) })}
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="paper-height">{t("layoutPaperHeight")}</Label>
-          <Input
-            id="paper-height"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.paperHeightCm}
-            onChange={(event) => setLayout({ ...layout, paperHeightCm: Number(event.target.value) })}
-          />
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {t("layoutSectionLabel")}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="label-width">{t("layoutLabelWidth")} (cm)</Label>
+            <Input
+              id="label-width"
+              type="number"
+              step="0.1"
+              value={layout.labelWidthCm}
+              onChange={(event) => setLayout({ ...layout, labelWidthCm: Number(event.target.value) })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="label-height">{t("layoutLabelHeight")} (cm)</Label>
+            <Input
+              id="label-height"
+              type="number"
+              step="0.1"
+              value={layout.labelHeightCm}
+              onChange={(event) => setLayout({ ...layout, labelHeightCm: Number(event.target.value) })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="cell-padding">{t("layoutPadding")} (cm)</Label>
+            <Input
+              id="cell-padding"
+              type="number"
+              step="0.05"
+              value={layout.cellPaddingCm ?? 0}
+              onChange={(event) =>
+                setLayout({ ...layout, cellPaddingCm: Number(event.target.value) })
+              }
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="margin">{t("layoutMargin")}</Label>
-          <Input
-            id="margin"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.marginCm}
-            onChange={(event) => setLayout({ ...layout, marginCm: Number(event.target.value) })}
-          />
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {t("layoutSectionGaps")}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="gap-x">{t("layoutGapX")} (cm)</Label>
+            <Input
+              id="gap-x"
+              type="number"
+              step="0.1"
+              value={layout.gapXCm ?? 0}
+              onChange={(event) => setLayout({ ...layout, gapXCm: Number(event.target.value) })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="gap-y">{t("layoutGapY")} (cm)</Label>
+            <Input
+              id="gap-y"
+              type="number"
+              step="0.1"
+              value={layout.gapYCm ?? 0}
+              onChange={(event) => setLayout({ ...layout, gapYCm: Number(event.target.value) })}
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="label-width">{t("layoutLabelWidth")}</Label>
-          <Input
-            id="label-width"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.labelWidthCm}
-            onChange={(event) => setLayout({ ...layout, labelWidthCm: Number(event.target.value) })}
-          />
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {t("layoutSectionOffsets")}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="offset-x">{t("layoutOffsetX")} (cm)</Label>
+            <Input
+              id="offset-x"
+              type="number"
+              step="0.05"
+              value={layout.offsetXCm ?? 0}
+              onChange={(event) => setLayout({ ...layout, offsetXCm: Number(event.target.value) })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="offset-y">{t("layoutOffsetY")} (cm)</Label>
+            <Input
+              id="offset-y"
+              type="number"
+              step="0.05"
+              value={layout.offsetYCm ?? 0}
+              onChange={(event) => setLayout({ ...layout, offsetYCm: Number(event.target.value) })}
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="label-height">{t("layoutLabelHeight")}</Label>
-          <Input
-            id="label-height"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.labelHeightCm}
-            onChange={(event) => setLayout({ ...layout, labelHeightCm: Number(event.target.value) })}
-          />
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {t("layoutSectionText")}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="barcode-height">{t("layoutBarcodeHeight")} (mm)</Label>
+            <Input
+              id="barcode-height"
+              type="number"
+              step="1"
+              value={layout.barcodeHeightMm ?? 12}
+              onChange={(event) =>
+                setLayout({ ...layout, barcodeHeightMm: Number(event.target.value) })
+              }
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="font-size">{t("layoutFontSize")} (pt)</Label>
+            <Input
+              id="font-size"
+              type="number"
+              step="0.5"
+              value={layout.fontSizePt ?? 7}
+              onChange={(event) => setLayout({ ...layout, fontSizePt: Number(event.target.value) })}
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="gap-x">{t("layoutGapX")}</Label>
-          <Input
-            id="gap-x"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.gapXCm ?? 0}
-            onChange={(event) => setLayout({ ...layout, gapXCm: Number(event.target.value) })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="gap-y">{t("layoutGapY")}</Label>
-          <Input
-            id="gap-y"
-            className="h-8"
-            type="number"
-            step="0.1"
-            value={layout.gapYCm ?? 0}
-            onChange={(event) => setLayout({ ...layout, gapYCm: Number(event.target.value) })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="barcode-height">{t("layoutBarcodeHeight")}</Label>
-          <Input
-            id="barcode-height"
-            className="h-8"
-            type="number"
-            step="1"
-            value={layout.barcodeHeightMm ?? 12}
-            onChange={(event) =>
-              setLayout({ ...layout, barcodeHeightMm: Number(event.target.value) })
-            }
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="font-size">{t("layoutFontSize")}</Label>
-          <Input
-            id="font-size"
-            className="h-8"
-            type="number"
-            step="0.5"
-            value={layout.fontSizePt ?? 7}
-            onChange={(event) => setLayout({ ...layout, fontSizePt: Number(event.target.value) })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="cell-padding">{t("layoutPadding")}</Label>
-          <Input
-            id="cell-padding"
-            className="h-8"
-            type="number"
-            step="0.05"
-            value={layout.cellPaddingCm ?? 0}
-            onChange={(event) =>
-              setLayout({ ...layout, cellPaddingCm: Number(event.target.value) })
-            }
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="offset-x">{t("layoutOffsetX")}</Label>
-          <Input
-            id="offset-x"
-            className="h-8"
-            type="number"
-            step="0.05"
-            value={layout.offsetXCm ?? 0}
-            onChange={(event) => setLayout({ ...layout, offsetXCm: Number(event.target.value) })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="offset-y">{t("layoutOffsetY")}</Label>
-          <Input
-            id="offset-y"
-            className="h-8"
-            type="number"
-            step="0.05"
-            value={layout.offsetYCm ?? 0}
-            onChange={(event) => setLayout({ ...layout, offsetYCm: Number(event.target.value) })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="pages">{t("pagesToRender")}</Label>
-          <Input
-            id="pages"
-            className="h-8"
-            type="number"
-            min={1}
-            value={pagesToRender}
-            onChange={(event) => setPagesToRender(Number(event.target.value))}
-          />
-        </div>
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {t("layoutSectionPages")}
+        </p>
+        <Input
+          id="pages"
+          type="number"
+          min={1}
+          value={pagesToRender}
+          onChange={(event) => setPagesToRender(Number(event.target.value))}
+        />
       </div>
     </div>
   );
@@ -1205,12 +1954,16 @@ function LayoutPanel({ layout, setLayout, pagesToRender, setPagesToRender }: Lay
 
 function LabelCell({
   cellId,
+  labelIndex,
   product,
   isSelected,
   activeProductId,
   selectedCount,
   onMouseDown,
   onMouseEnter,
+  onPointerDown,
+  onPointerEnter,
+  onPointerUp,
   onClear,
   onClearSelected,
   onAssignSelected,
@@ -1220,12 +1973,16 @@ function LabelCell({
   paddingCm,
 }: {
   cellId: string;
+  labelIndex: number;
   product: Product | null;
   isSelected: boolean;
   activeProductId: string | null;
   selectedCount: number;
   onMouseDown: (event: React.MouseEvent) => void;
   onMouseEnter: () => void;
+  onPointerDown: (event: React.PointerEvent) => void;
+  onPointerEnter: () => void;
+  onPointerUp: () => void;
   onClear: () => void;
   onClearSelected: () => void;
   onAssignSelected: () => void;
@@ -1240,13 +1997,19 @@ function LabelCell({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-      className={`group flex h-full flex-col items-center justify-center rounded-sm border p-1 text-center select-none ${
-        isSelected ? "border-slate-500 bg-slate-50" : "border-slate-200"
+          className={`group relative flex h-full flex-col items-center justify-center border p-1 text-center select-none transition-colors hover:border-primary/30 ${
+        isSelected ? "border-primary/50 bg-primary/10" : "border-slate-200"
       }`}
           onMouseDown={onMouseDown}
           onMouseEnter={onMouseEnter}
+          onPointerDown={onPointerDown}
+          onPointerEnter={onPointerEnter}
+          onPointerUp={onPointerUp}
           style={{ padding: `${paddingCm}cm`, boxSizing: "border-box" }}
         >
+          <span className="pointer-events-none absolute left-1 top-1 rounded bg-white/80 px-1 text-[9px] text-slate-400 opacity-0 transition group-hover:opacity-100">
+            {labelIndex}
+          </span>
           {product ? (
             <div
               className="flex w-full flex-col items-center"
@@ -1287,10 +2050,6 @@ function LabelCell({
         <ContextMenuItem onClick={onClear}>{t("clearCell")}</ContextMenuItem>
         <ContextMenuItem onClick={onDuplicate} disabled={!product}>
           {t("duplicateNextEmpty")}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem onClick={onClearSelected} disabled={selectedCount === 0}>
-          {t("clearSelection")}
         </ContextMenuItem>
         <ContextMenuItem onClick={onAssignSelected} disabled={!activeProductId || selectedCount === 0}>
           {t("fillSelectionWithActive")}

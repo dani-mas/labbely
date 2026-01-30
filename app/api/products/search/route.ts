@@ -20,11 +20,14 @@ export async function GET(request: Request) {
 
   const rateKey = sessionId ?? request.headers.get("x-forwarded-for") ?? "anonymous";
   if (!checkRateLimit(`search:${rateKey}`, 60, 60_000)) {
-    return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
+    return NextResponse.json(
+      { error: "Rate limit exceeded", errorCode: "rate_limited" },
+      { status: 429 },
+    );
   }
 
   if (!session && process.env.ODOO_MOCK !== "true") {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized", errorCode: "unauthorized" }, { status: 401 });
   }
 
   if (process.env.ODOO_MOCK === "true") {
@@ -49,6 +52,6 @@ export async function GET(request: Request) {
     return NextResponse.json(results);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Search failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message, errorCode: "search_failed" }, { status: 500 });
   }
 }
