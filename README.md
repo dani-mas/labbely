@@ -49,6 +49,17 @@ Sessions are stored **in-memory** (a `Map` in `lib/sessionStore.ts`). That means
 - `NEXT_PUBLIC_SITE_URL`: used for sitemap/robots/metadata (defaults to `http://localhost:3000`)
 - `ODOO_MOCK`: set to `"true"` to bypass real Odoo calls (mock login/search)
 
+## Docker deployment
+
+1) Copy `.env.example` to `.env` and set values.
+2) Build and run:
+
+```bash
+docker compose up -d --build
+```
+
+The app will listen on `http://localhost:${APP_PORT}` (default `3001`).
+
 ## Open source + credits
 
 - This repository is intended to be **open source** (add a `LICENSE` file before publishing if you haven’t yet).
